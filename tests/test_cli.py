@@ -6,6 +6,9 @@ def test_build_download_cmd_basic():
     # Should include output template flags and url at end
     assert "-o" in cmd
     assert cmd[-1] == "https://example.com/video"
+    # Prefer mp4 format + merge
+    assert "--merge-output-format" in cmd
+    assert "mp4" in cmd
 
 
 def test_build_download_cmd_audio_only():

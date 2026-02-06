@@ -38,6 +38,9 @@ def _yt_dlp_exe() -> list[str]:
     return [sys.executable, "-m", "yt_dlp"]
 
 
+VIDEO_FMT_MP4 = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+
+
 def build_download_cmd(
     url: str,
     *,
@@ -60,6 +63,9 @@ def build_download_cmd(
     if audio_only:
         # Default to best audio; keep it simple and let yt-dlp/ffmpeg decide container.
         cmd += ["-f", "bestaudio/best", "-x"]
+    else:
+        # Prefer mp4 for interoperability.
+        cmd += ["-f", VIDEO_FMT_MP4, "--merge-output-format", "mp4"]
 
     if extra:
         cmd += extra
