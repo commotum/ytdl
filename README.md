@@ -1,5 +1,9 @@
 # ytdl
 
+Notes on filenames:
+- Downloads are saved as `%(id)s.%(ext)s` for pipeline stability.
+- `yt-dlp` metadata is saved alongside as `%(id)s.info.json` so you can recover title/uploader/etc.
+
 A tiny CLI wrapper around `yt-dlp`, with a stable interface and a local `gate`.
 
 ## Install / run (inside repo)

@@ -9,6 +9,9 @@ def test_build_download_cmd_basic():
     # Prefer mp4 format + merge
     assert "--merge-output-format" in cmd
     assert "mp4" in cmd
+    # Pipeline-stability flags
+    assert "--restrict-filenames" in cmd
+    assert "--write-info-json" in cmd
 
 
 def test_build_download_cmd_audio_only():

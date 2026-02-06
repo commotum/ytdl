@@ -17,7 +17,9 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 DEFAULT_OUTDIR = Path("Downloads")
-DEFAULT_OUTTMPL = str(DEFAULT_OUTDIR / "%(title)s [%(id)s].%(ext)s")
+# Prefer ID-based filenames for robust downstream pipelines (no Unicode/quote surprises).
+# The human-readable title can always be recovered from the .info.json sidecar.
+DEFAULT_OUTTMPL = str(DEFAULT_OUTDIR / "%(id)s.%(ext)s")
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,10 @@ def build_download_cmd(
         *_yt_dlp_exe(),
         "--no-progress",
         "--newline",
+        # Make filenames safe/portable even if a caller overrides outtmpl.
+        "--restrict-filenames",
+        # Write metadata sidecar so title/uploader/etc are preserved even with ID filenames.
+        "--write-info-json",
         "-o",
         outtmpl,
     ]
@@ -76,6 +82,93 @@ def build_download_cmd(
 
 def build_info_cmd(url: str) -> list[str]:
     return [*_yt_dlp_exe(), "-J", url]
+
+
+def build_extract_opus_cmd(src: Path, dest: Path, *, bitrate: str = "96k") -> list[str]:
+    """Build an ffmpeg command that extracts/encodes audio to Opus.
+
+    We intentionally re-encode to Opus to produce a stable `.opus` artifact even
+    when the source container uses AAC (common for mp4).
+    """
+    return [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-vn",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        bitrate,
+        str(dest),
+    ]
+
+
+def _available_caption_langs(info: dict) -> set[str]:
+    subs = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+    langs = set(subs.keys()) | set(auto.keys())
+    # yt-dlp can include pseudo keys like "live_chat"; keep them out.
+    return {lang for lang in langs if isinstance(lang, str) and lang and lang != "live_chat"}
+
+
+def choose_caption_lang(info: dict) -> Optional[str]:
+    """Choose one caption language.
+
+    Policy:
+    1) Prefer best available English captions (manual or auto): any lang that starts with "en".
+    2) Else fall back to the video's primary/source language (as reported by yt-dlp),
+       *only if* captions exist for it.
+    3) Else return None (skip).
+    """
+
+    langs = _available_caption_langs(info)
+    if not langs:
+        return None
+
+    # Prefer English (en, en-US, en-GB, en.*)
+    en_like = sorted(
+        [
+            lang
+            for lang in langs
+            if lang == "en" or lang.startswith("en-") or lang.startswith("en_") or lang.startswith("en")
+        ]
+    )
+    if en_like:
+        # Prefer plain "en" if present; otherwise deterministic first.
+        return "en" if "en" in en_like else en_like[0]
+
+    # Fall back to detected/original language if present in captions.
+    for key in ("original_language", "language"):
+        v = info.get(key)
+        if isinstance(v, str) and v in langs:
+            return v
+
+    return None
+
+
+def build_captions_cmd(url: str, *, outtmpl: str, lang: str) -> list[str]:
+    """Download best available captions in a single language (manual or auto).
+
+    Outputs .vtt when available; if none available, yt-dlp exits 0 but creates nothing.
+    """
+    return [
+        *_yt_dlp_exe(),
+        "--no-progress",
+        "--newline",
+        "--restrict-filenames",
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs",
+        lang,
+        "--sub-format",
+        "vtt",
+        "-o",
+        outtmpl,
+        "--no-playlist",
+        url,
+    ]
 
 
 def run(cmd: list[str], *, verbose: bool = False) -> RunResult:
@@ -152,6 +245,96 @@ def audio(
     if json_out:
         _print_download_summary_json(url=url, outdir=outdir, exit_code=r.returncode)
     raise typer.Exit(r.returncode)
+
+
+@app.command()
+def pair(
+    url: str = typer.Argument(..., help="Video URL (YouTube or any yt-dlp supported site)."),
+    outdir: Path = typer.Option(DEFAULT_OUTDIR, "--outdir", help="Output directory."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print the executed commands."),
+    json_out: bool = typer.Option(False, "--json", help="Print a JSON summary to stdout (for scripting)."),
+    opus_bitrate: str = typer.Option("96k", "--opus-bitrate", help="Target Opus bitrate (ffmpeg -b:a)."),
+):
+    """Download a single MP4 (video+audio) AND an Opus audio file.
+
+    Intended for the common pipeline:
+    - save a high-quality, single-file MP4 for viewing/archive
+    - save a stable `.opus` for feeding diarization (e.g. whisper-diarization)
+
+    This avoids fragile title-based filenames by using the video ID.
+    """
+    _ensure_outdir(outdir)
+
+    # Resolve the video ID first so we can use deterministic filenames.
+    info_cmd = build_info_cmd(url)
+    if verbose:
+        typer.echo("$ " + " ".join(shlex.quote(c) for c in info_cmd), err=True)
+    p = subprocess.run(info_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        sys.stderr.write(p.stderr)
+        raise typer.Exit(p.returncode)
+
+    try:
+        data = json.loads(p.stdout)
+    except Exception:
+        sys.stderr.write(p.stdout)
+        raise typer.Exit(2)
+
+    vid = data.get("id")
+    if not vid:
+        sys.stderr.write("Could not resolve video id from yt-dlp -J output\n")
+        raise typer.Exit(2)
+
+    mp4_path = outdir / f"{vid}.mp4"
+    opus_path = outdir / f"{vid}.opus"
+
+    # Captions (best English if available, else primary/source language).
+    caption_lang = choose_caption_lang(data)
+
+    # Download MP4 (single file).
+    mp4_outtmpl = str(outdir / f"{vid}.%(ext)s")
+    dl_cmd = build_download_cmd(url, outtmpl=mp4_outtmpl, playlist=False)
+    r = run(dl_cmd, verbose=verbose)
+    if r.returncode != 0:
+        if json_out:
+            _print_download_summary_json(url=url, outdir=outdir, exit_code=r.returncode)
+        raise typer.Exit(r.returncode)
+
+    # Extract/encode Opus from the MP4.
+    extract_cmd = build_extract_opus_cmd(mp4_path, opus_path, bitrate=opus_bitrate)
+    rr = run(extract_cmd, verbose=verbose)
+
+    # Captions (best English if available, else primary/source language; else skip).
+    caption_files: list[str] = []
+    cap_rc = 0
+    if caption_lang:
+        cap_outtmpl = str(outdir / f"{vid}.%(ext)s")
+        cap_cmd = build_captions_cmd(url, outtmpl=cap_outtmpl, lang=caption_lang)
+        cap_r = run(cap_cmd, verbose=verbose)
+        cap_rc = cap_r.returncode
+        # Gather whatever yt-dlp wrote (vtt preferred).
+        caption_files = [str(p) for p in sorted(outdir.glob(f"{vid}.*.vtt"))]
+
+    exit_code = 0
+    for rc in (rr.returncode, cap_rc):
+        if rc != 0:
+            exit_code = rc
+            break
+
+    if json_out:
+        payload = {
+            "url": url,
+            "outdir": str(outdir),
+            "id": vid,
+            "mp4": str(mp4_path),
+            "opus": str(opus_path),
+            "captions_lang": caption_lang,
+            "captions": caption_files,
+            "exit_code": exit_code,
+        }
+        sys.stdout.write(json.dumps(payload) + "\n")
+
+    raise typer.Exit(exit_code)
 
 
 @app.command()
