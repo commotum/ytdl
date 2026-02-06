@@ -11,7 +11,12 @@ from typing import Optional
 
 import typer
 
+from . import doctor
+
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+# Back-compat name shown in CLI: `doctor` not `doctor-cmd`
+app.command(name="doctor")(doctor_cmd)
 
 
 DEFAULT_OUTDIR = Path("Downloads")
@@ -78,39 +83,77 @@ def run(cmd: list[str], *, verbose: bool = False) -> RunResult:
     return RunResult(cmd=cmd, returncode=p.returncode)
 
 
+def _print_download_summary_json(*, url: str, outdir: Path, exit_code: int) -> None:
+    """Emit a conservative JSON summary for chaining.
+
+    We intentionally do not try to perfectly enumerate output files (yt-dlp has
+    many modes and templates). For chaining, outdir + url + exit_code is still
+    useful, and can be extended later.
+    """
+    payload = {
+        "url": url,
+        "outdir": str(outdir),
+        "exit_code": exit_code,
+    }
+    sys.stdout.write(json.dumps(payload) + "\n")
+
+
+@app.command()
+def get(
+    url: str = typer.Argument(..., help="Video URL (YouTube or any yt-dlp supported site)."),
+    outdir: Path = typer.Option(DEFAULT_OUTDIR, "--outdir", help="Output directory."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print the executed command."),
+    json_out: bool = typer.Option(False, "--json", help="Print a JSON summary to stdout (for scripting)."),
+):
+    """Safe default: download a single video (no playlist) as best video+audio."""
+    _ensure_outdir(outdir)
+    outtmpl = str(outdir / Path(DEFAULT_OUTTMPL).name)
+    cmd = build_download_cmd(url, outtmpl=outtmpl, playlist=False)
+    r = run(cmd, verbose=verbose)
+    if json_out:
+        _print_download_summary_json(url=url, outdir=outdir, exit_code=r.returncode)
+    raise typer.Exit(r.returncode)
+
+
 @app.command()
 def dl(
-    url: str = typer.Argument(..., help="YouTube (or other supported site) URL."),
+    url: str = typer.Argument(..., help="Video URL (YouTube or any yt-dlp supported site)."),
     outdir: Path = typer.Option(DEFAULT_OUTDIR, "--outdir", help="Output directory."),
     playlist: bool = typer.Option(True, "--playlist/--no-playlist", help="Download playlist items if URL is a playlist."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print the executed command."),
+    json_out: bool = typer.Option(False, "--json", help="Print a JSON summary to stdout (for scripting)."),
 ):
     """Download best video+audio for a URL."""
     _ensure_outdir(outdir)
     outtmpl = str(outdir / Path(DEFAULT_OUTTMPL).name)
     cmd = build_download_cmd(url, outtmpl=outtmpl, playlist=playlist)
     r = run(cmd, verbose=verbose)
+    if json_out:
+        _print_download_summary_json(url=url, outdir=outdir, exit_code=r.returncode)
     raise typer.Exit(r.returncode)
 
 
 @app.command()
 def audio(
-    url: str = typer.Argument(..., help="YouTube (or other supported site) URL."),
+    url: str = typer.Argument(..., help="Video URL (YouTube or any yt-dlp supported site)."),
     outdir: Path = typer.Option(DEFAULT_OUTDIR, "--outdir", help="Output directory."),
     playlist: bool = typer.Option(True, "--playlist/--no-playlist", help="Download playlist items if URL is a playlist."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print the executed command."),
+    json_out: bool = typer.Option(False, "--json", help="Print a JSON summary to stdout (for scripting)."),
 ):
     """Download audio-only for a URL."""
     _ensure_outdir(outdir)
     outtmpl = str(outdir / Path(DEFAULT_OUTTMPL).name)
     cmd = build_download_cmd(url, outtmpl=outtmpl, audio_only=True, playlist=playlist)
     r = run(cmd, verbose=verbose)
+    if json_out:
+        _print_download_summary_json(url=url, outdir=outdir, exit_code=r.returncode)
     raise typer.Exit(r.returncode)
 
 
 @app.command()
 def info(
-    url: str = typer.Argument(..., help="YouTube (or other supported site) URL."),
+    url: str = typer.Argument(..., help="Video URL (YouTube or any yt-dlp supported site)."),
     json_out: bool = typer.Option(True, "--json/--no-json", help="Print raw JSON to stdout."),
 ):
     """Fetch metadata (no download)."""
@@ -147,6 +190,23 @@ def info(
         f"url: {webpage_url}",
     ]
     sys.stdout.write("\n".join(parts) + "\n")
+
+
+@app.command()
+def doctor_cmd(
+    outdir: Path = typer.Option(DEFAULT_OUTDIR, "--outdir", help="Output directory to validate."),
+    json_out: bool = typer.Option(True, "--json/--no-json", help="Output JSON (default) for scripting."),
+):
+    """Check local dependencies and basic writeability for chaining."""
+    report = doctor.check(outdir)
+    doctor.print_report(report, json_out=json_out)
+    # Non-zero if something important is missing.
+    exit_code = 0
+    if not report.yt_dlp:
+        exit_code = 2
+    if not report.outdir_writable:
+        exit_code = 3
+    raise typer.Exit(exit_code)
 
 
 @app.command()
