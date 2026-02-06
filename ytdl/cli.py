@@ -15,9 +15,6 @@ from . import doctor
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
-# Back-compat name shown in CLI: `doctor` not `doctor-cmd`
-app.command(name="doctor")(doctor_cmd)
-
 
 DEFAULT_OUTDIR = Path("Downloads")
 DEFAULT_OUTTMPL = str(DEFAULT_OUTDIR / "%(title)s [%(id)s].%(ext)s")
@@ -192,7 +189,7 @@ def info(
     sys.stdout.write("\n".join(parts) + "\n")
 
 
-@app.command()
+@app.command(name="doctor")
 def doctor_cmd(
     outdir: Path = typer.Option(DEFAULT_OUTDIR, "--outdir", help="Output directory to validate."),
     json_out: bool = typer.Option(True, "--json/--no-json", help="Output JSON (default) for scripting."),
