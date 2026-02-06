@@ -1,7 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ytdl"
 version = "0.1.0"
-description = "Add your description here"
+description = "CLI wrapper around yt-dlp"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "typer>=0.21.1",
+  "yt-dlp>=2026.2.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0.2",
+  "ruff>=0.15.0",
+]
+
+[project.scripts]
+ytdl = "ytdl.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["ytdl"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+addopts = "-q"
