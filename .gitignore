@@ -6,3 +6,4 @@ __pycache__/
 Downloads/
 
 ytdl.egg-info/
+.DS_Store
